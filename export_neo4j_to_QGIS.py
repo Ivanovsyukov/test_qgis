@@ -9,7 +9,7 @@ DATABASE = "neo4j"
 
 # === Проверка аргументов ===
 if len(sys.argv) < 3:
-    print("Использование: python3  python3 export_neo4j_to_QGIS.py <relation_type> <node_type>")
+    print("Использование: python3 export_neo4j_to_QGIS.py <relation_type> <node_type>")
     print("Например: python3 export_neo4j_to_QGIS.py БирскBusRouteSegment БирскBusStop")
     sys.exit(1)
 
@@ -21,7 +21,6 @@ driver = GraphDatabase.driver(URI, auth=AUTH)
 def point_to_geojson(point):
     if not point:
         return None
-    # point.x — долгота, point.y — широта
     return {
         "type": "Point",
         "coordinates": [point.x, point.y]
@@ -31,12 +30,14 @@ def point_to_geojson(point):
 query = f"""
 MATCH (a:`{node_type}`)-[r:`{relation_type}`]->(b:`{node_type}`)
 RETURN 
-    id(a) AS id_a,
+    elementId(a) AS id_a,
     a.name AS name_a,
     a.location AS loc_a,
-    id(b) AS id_b,
+    a.leiden_community AS leiden_a,
+    elementId(b) AS id_b,
     b.name AS name_b,
     b.location AS loc_b,
+    b.leiden_community AS leiden_b,
     r.name AS rel_name,
     r.duration AS duration,
     r.route AS route
@@ -58,13 +59,21 @@ with driver.session(database=DATABASE) as session:
             features_nodes[id_a] = {
                 "type": "Feature",
                 "geometry": point_to_geojson(loc_a),
-                "properties": {"id": id_a, "name": record["name_a"]}
+                "properties": {
+                    "id": id_a,
+                    "name": record["name_a"],
+                    "leiden_community": record["leiden_a"]
+                }
             }
         if id_b not in features_nodes and loc_b:
             features_nodes[id_b] = {
                 "type": "Feature",
                 "geometry": point_to_geojson(loc_b),
-                "properties": {"id": id_b, "name": record["name_b"]}
+                "properties": {
+                    "id": id_b,
+                    "name": record["name_b"],
+                    "leiden_community": record["leiden_b"]
+                }
             }
 
         # --- Связи ---
