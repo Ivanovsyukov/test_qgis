@@ -23,13 +23,13 @@ AUTH = ("neo4j", "12345678")
 DATABASE = "neo4j"
 
 # === Проверка аргументов ===
-if len(sys.argv) < 2:
-    print("Использование: python3 export_neo4j_to_QGIS.py <имя города по базе данных>")
-    print("Например: python3 export_neo4j_to_QGIS.py Бирск")
+if len(sys.argv) < 3:
+    print("Использование: python3 export_neo4j_to_QGIS.py <relation_type> <node_type>")
+    print("Например: python3 export_neo4j_to_QGIS.py БирскBusRouteSegment БирскBusStop")
     sys.exit(1)
 
-relation_type = sys.argv[1]+"BusRouteSegment"
-node_type = sys.argv[1]+"BusStop"
+relation_type = sys.argv[1]
+node_type = sys.argv[2]
 
 driver = GraphDatabase.driver(URI, auth=AUTH)
 
