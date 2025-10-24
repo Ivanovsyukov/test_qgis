@@ -1,6 +1,21 @@
 import sys
 import json
 from neo4j import GraphDatabase
+import colorsys
+import random
+
+def distinct_random_color():
+    # Генерируем равномерно распределенные оттенки
+    hue = random.random()  # 0.0 - 1.0
+    saturation = 0.7 + random.random() * 0.3  # 70-100%
+    lightness = 0.4 + random.random() * 0.3  # 40-70%
+    
+    rgb = colorsys.hls_to_rgb(hue, lightness, saturation)
+    return '#{:02x}{:02x}{:02x}'.format(
+        int(rgb[0] * 255),
+        int(rgb[1] * 255), 
+        int(rgb[2] * 255)
+    )
 
 # === Настройки подключения ===
 URI = "bolt://localhost:7687"
@@ -21,10 +36,11 @@ driver = GraphDatabase.driver(URI, auth=AUTH)
 def point_to_geojson(point):
     if not point:
         return None
-    return {
-        "type": "Point",
-        "coordinates": [point.x, point.y]
-    }
+    return {"type": "Point", "coordinates": [point.x, point.y]}
+
+# === Генератор случайного цвета (для разных leiden_community) ===
+def random_color():
+    return "#{:06x}".format(random.randint(0, 0xFFFFFF))
 
 # === Запрос ===
 query = f"""
@@ -45,6 +61,7 @@ RETURN
 
 features_nodes = {}
 features_links = []
+colors_by_community = {}  # чтобы одинаковые сообщества были одного цвета
 
 with driver.session(database=DATABASE) as session:
     result = session.run(query)
@@ -54,6 +71,18 @@ with driver.session(database=DATABASE) as session:
         loc_a = record["loc_a"]
         loc_b = record["loc_b"]
 
+        leiden_a = record["leiden_a"]
+        leiden_b = record["leiden_b"]
+
+        # --- Цвет для каждого сообщества ---
+        if leiden_a not in colors_by_community:
+            colors_by_community[leiden_a] = distinct_random_color()
+        if leiden_b not in colors_by_community:
+            colors_by_community[leiden_b] = distinct_random_color()
+
+        color_a = colors_by_community[leiden_a]
+        color_b = colors_by_community[leiden_b]
+
         # --- Узлы ---
         if id_a not in features_nodes and loc_a:
             features_nodes[id_a] = {
@@ -62,7 +91,10 @@ with driver.session(database=DATABASE) as session:
                 "properties": {
                     "id": id_a,
                     "name": record["name_a"],
-                    "leiden_community": record["leiden_a"]
+                    "leiden_community": leiden_a,
+                    "color": color_a,
+                    "popup": f"<div style='background-color:white; color:black; padding:5px; border-radius:4px; font-family:sans-serif; font-size:12px;'><b>{record['name_a']}</b><br>Community: {leiden_a}</div>"
+
                 }
             }
         if id_b not in features_nodes and loc_b:
@@ -72,7 +104,10 @@ with driver.session(database=DATABASE) as session:
                 "properties": {
                     "id": id_b,
                     "name": record["name_b"],
-                    "leiden_community": record["leiden_b"]
+                    "leiden_community": leiden_b,
+                    "color": color_b,
+                    "popup": f"<div style='background-color:white; color:black; padding:5px; border-radius:4px; font-family:sans-serif; font-size:12px;'><b>{record['name_b']}</b><br>Community: {leiden_b}</div>"
+
                 }
             }
 
@@ -118,3 +153,6 @@ with open(file_links, "w", encoding="utf-8") as f:
 
 print(f"✅ Узлы сохранены в {file_nodes}")
 print(f"✅ Связи сохранены в {file_links}")
+print("🎨 Цвета сообществ:")
+for k, v in colors_by_community.items():
+    print(f"  Community {k}: {v}")
