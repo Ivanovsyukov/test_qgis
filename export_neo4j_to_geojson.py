@@ -1,31 +1,50 @@
-import sys
 import json
-from neo4j import GraphDatabase
-import colorsys
+import os
+import sys
 import random
+import colorsys
+from neo4j import GraphDatabase
 
 def distinct_random_color():
     # Генерируем равномерно распределенные оттенки
     hue = random.random()  # 0.0 - 1.0
     saturation = 0.7 + random.random() * 0.3  # 70-100%
     lightness = 0.4 + random.random() * 0.3  # 40-70%
-    
+
     rgb = colorsys.hls_to_rgb(hue, lightness, saturation)
     return '#{:02x}{:02x}{:02x}'.format(
         int(rgb[0] * 255),
-        int(rgb[1] * 255), 
+        int(rgb[1] * 255),
         int(rgb[2] * 255)
     )
 
-# === Настройки подключения ===
-URI = "bolt://localhost:7687"
-AUTH = ("neo4j", "12345678")
-DATABASE = "neo4j"
+# === Чтение конфигурации ===
+CONFIG_PATH = "config.json"
+
+if not os.path.exists(CONFIG_PATH):
+    print(f"❌ Конфиг {CONFIG_PATH} не найден. Создайте файл с параметрами подключения.")
+    sys.exit(1)
+
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+URI = config.get("uri", "bolt://localhost:7687")
+USER = config.get("user", "neo4j")
+PASSWORD = config.get("password", "neo4j")
+DATABASE = config.get("database", "neo4j")
+
+AUTH = (USER, PASSWORD)
+
+DEBUG = config.get("debug", False)
+
+def log_debug(msg):
+    if DEBUG:
+        print(msg)
 
 # === Проверка аргументов ===
 if len(sys.argv) < 3:
-    print("Использование: python3 export_neo4j_to_QGIS.py <relation_type> <node_type>")
-    print("Например: python3 export_neo4j_to_QGIS.py БирскBusRouteSegment БирскBusStop")
+    print("Использование: python3 export_neo4j_to_geojson.py <relation_type> <node_type>")
+    print("Например: python3 export_neo4j_to_geojson.py БирскBusRouteSegment БирскBusStop")
     sys.exit(1)
 
 relation_type = sys.argv[1]
@@ -37,10 +56,6 @@ def point_to_geojson(point):
     if not point:
         return None
     return {"type": "Point", "coordinates": [point.x, point.y]}
-
-# === Генератор случайного цвета (для разных leiden_community) ===
-def random_color():
-    return "#{:06x}".format(random.randint(0, 0xFFFFFF))
 
 # === Запрос ===
 query = f"""
@@ -94,7 +109,6 @@ with driver.session(database=DATABASE) as session:
                     "leiden_community": leiden_a,
                     "color": color_a,
                     "popup": f"<div style='background-color:white; color:black; padding:5px; border-radius:4px; font-family:sans-serif; font-size:12px;'><b>{record['name_a']}</b><br>Community: {leiden_a}</div>"
-
                 }
             }
         if id_b not in features_nodes and loc_b:
@@ -107,7 +121,6 @@ with driver.session(database=DATABASE) as session:
                     "leiden_community": leiden_b,
                     "color": color_b,
                     "popup": f"<div style='background-color:white; color:black; padding:5px; border-radius:4px; font-family:sans-serif; font-size:12px;'><b>{record['name_b']}</b><br>Community: {leiden_b}</div>"
-
                 }
             }
 
@@ -142,17 +155,81 @@ geojson_links = {
     "features": features_links
 }
 
-file_nodes = f"nodes_{node_type}.geojson"
-file_links = f"links_{relation_type}.geojson"
+if DEBUG:
+    file_nodes = f"nodes_{node_type}.geojson"
+    file_links = f"links_{relation_type}.geojson"
 
-with open(file_nodes, "w", encoding="utf-8") as f:
-    json.dump(geojson_nodes, f, ensure_ascii=False, indent=2)
+    with open(file_nodes, "w", encoding="utf-8") as f:
+        json.dump(geojson_nodes, f, ensure_ascii=False, indent=2)
 
-with open(file_links, "w", encoding="utf-8") as f:
-    json.dump(geojson_links, f, ensure_ascii=False, indent=2)
+    with open(file_links, "w", encoding="utf-8") as f:
+        json.dump(geojson_links, f, ensure_ascii=False, indent=2)
 
-print(f"✅ Узлы сохранены в {file_nodes}")
-print(f"✅ Связи сохранены в {file_links}")
-print("🎨 Цвета сообществ:")
-for k, v in colors_by_community.items():
-    print(f"  Community {k}: {v}")
+log_debug("✅ Узлы сохранены в файл nodes.geojson")
+if DEBUG:
+    print("🎨 Цвета сообществ:")
+    for k, v in colors_by_community.items():
+        print(f"  Community {k}: {v}")
+
+
+# === Генерация HTML-файла ===
+def generate_leaflet_html_inline(nodes_data, links_data, output_html="map.html"):
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Neo4j Graph Map</title>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body {{ margin: 0; padding: 0; }}
+        #map {{ position: absolute; top: 0; bottom: 0; width: 100%; }}
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const nodesData = {json.dumps(nodes_data, ensure_ascii=False)};
+        const linksData = {json.dumps(links_data, ensure_ascii=False)};
+
+        const map = L.map('map').setView([0, 0], 2);
+
+        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+            attribution: '© OpenStreetMap contributors'
+        }}).addTo(map);
+
+        const nodesLayer = L.geoJSON(nodesData, {{
+            pointToLayer: function(feature, latlng) {{
+                const color = feature.properties.color || '#000000';
+                return L.circleMarker(latlng, {{
+                    radius: 8,
+                    fillColor: color,
+                    color: "#000",
+                    weight: 1,
+                    opacity: 1,
+                    fillOpacity: 0.8
+                }});
+            }},
+            onEachFeature: function(feature, layer) {{
+                if (feature.properties.popup) {{
+                    layer.bindPopup(feature.properties.popup);
+                }}
+            }}
+        }}).addTo(map);
+
+        const linksLayer = L.geoJSON(linksData, {{
+            style: {{ color: 'gray', weight: 1.5, opacity: 0.6 }}
+        }}).addTo(map);
+
+        const group = new L.featureGroup([...nodesLayer.getLayers(), ...linksLayer.getLayers()]);
+        map.fitBounds(group.getBounds());
+    </script>
+</body>
+</html>
+"""
+    with open(output_html, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    log_debug(f"✅ Карта сохранена в {output_html}")
+
+# === В конце скрипта вызываем функцию ===
+generate_leaflet_html_inline(geojson_nodes, geojson_links)
