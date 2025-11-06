@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+# export_neo4j_to_geojson.py
+# Использование: python3 export_neo4j_to_geojson.py <relation_type> <node_type> <metric_name>
+# metric_name: 'leiden_community', 'louvain_community', 'pageRank', 'betweenness'
+
 import json
 import os
 import sys
@@ -6,11 +11,9 @@ import colorsys
 from neo4j import GraphDatabase
 
 def distinct_random_color():
-    # Генерируем равномерно распределенные оттенки
-    hue = random.random()  # 0.0 - 1.0
-    saturation = 0.7 + random.random() * 0.3  # 70-100%
-    lightness = 0.4 + random.random() * 0.3  # 40-70%
-
+    hue = random.random()
+    saturation = 0.7 + random.random() * 0.3
+    lightness = 0.4 + random.random() * 0.3
     rgb = colorsys.hls_to_rgb(hue, lightness, saturation)
     return '#{:02x}{:02x}{:02x}'.format(
         int(rgb[0] * 255),
@@ -32,9 +35,7 @@ URI = config.get("uri", "bolt://localhost:7687")
 USER = config.get("user", "neo4j")
 PASSWORD = config.get("password", "neo4j")
 DATABASE = config.get("database", "neo4j")
-
 AUTH = (USER, PASSWORD)
-
 DEBUG = config.get("debug", False)
 
 def log_debug(msg):
@@ -42,86 +43,178 @@ def log_debug(msg):
         print(msg)
 
 # === Проверка аргументов ===
-if len(sys.argv) < 3:
-    print("Использование: python3 export_neo4j_to_geojson.py <relation_type> <node_type>")
-    print("Например: python3 export_neo4j_to_geojson.py БирскBusRouteSegment БирскBusStop")
+if len(sys.argv) < 4:
+    print("Использование: python3 export_neo4j_to_geojson.py <relation_type> <node_type> <metric_name>")
+    print("Пример: python3 export_neo4j_to_geojson.py БирскBusRouteSegment БирскBusStop pageRank")
     sys.exit(1)
 
 relation_type = sys.argv[1]
 node_type = sys.argv[2]
+metric_name = sys.argv[3]  # например, 'leiden_community', 'pageRank' и т.п.
+
+# Определяем тип визуализации
+if metric_name in ("leiden_community", "louvain_community"):
+    view_mode = "community"
+elif metric_name in ("pageRank", "betweenness"):
+    view_mode = "centrality"
+else:
+    print(f"❌ Неизвестная метрика: {metric_name}. Должна быть одна из: "
+          "leiden_community, louvain_community, pageRank, betweenness")
+    sys.exit(1)
 
 driver = GraphDatabase.driver(URI, auth=AUTH)
 
 def point_to_geojson(point):
     if not point:
         return None
+    # Neo4j point: используем x,y (если в вашей БД longitude/latitude — поменяйте)
     return {"type": "Point", "coordinates": [point.x, point.y]}
 
-# === Запрос ===
+# === Динамическое построение списка полей для RETURN ===
+base_return = [
+    "elementId(a) AS id_a",
+    "a.name AS name_a",
+    "a.location AS loc_a",
+    "elementId(b) AS id_b",
+    "b.name AS name_b",
+    "b.location AS loc_b",
+    "r.name AS rel_name",
+    "r.duration AS duration",
+    "r.route AS route"
+]
+
+if view_mode == "community":
+    base_return += [
+        "a.leiden_community AS leiden_a",
+        "a.louvain_community AS louvain_a",
+        "b.leiden_community AS leiden_b",
+        "b.louvain_community AS louvain_b"
+    ]
+else:
+    base_return += [
+        "a.pageRank AS pageRank_a",
+        "a.betweenness AS betweenness_a",
+        "b.pageRank AS pageRank_b",
+        "b.betweenness AS betweenness_b"
+    ]
+
+return_clause = ",\n    ".join(base_return)
+
 query = f"""
 MATCH (a:`{node_type}`)-[r:`{relation_type}`]->(b:`{node_type}`)
-RETURN 
-    elementId(a) AS id_a,
-    a.name AS name_a,
-    a.location AS loc_a,
-    a.leiden_community AS leiden_a,
-    elementId(b) AS id_b,
-    b.name AS name_b,
-    b.location AS loc_b,
-    b.leiden_community AS leiden_b,
-    r.name AS rel_name,
-    r.duration AS duration,
-    r.route AS route
+RETURN
+    {return_clause}
 """
+
+log_debug("Generated Cypher query:")
+log_debug(query)
 
 features_nodes = {}
 features_links = []
-colors_by_community = {}  # чтобы одинаковые сообщества были одного цвета
+colors_by_community = {}
+
+# helper: mapping metric_name -> record key names
+record_key_a = {
+    "leiden_community": "leiden_a",
+    "louvain_community": "louvain_a",
+    "pageRank": "pageRank_a",
+    "betweenness": "betweenness_a"
+}
+record_key_b = {
+    "leiden_community": "leiden_b",
+    "louvain_community": "louvain_b",
+    "pageRank": "pageRank_b",
+    "betweenness": "betweenness_b"
+}
 
 with driver.session(database=DATABASE) as session:
     result = session.run(query)
     for record in result:
-        id_a = record["id_a"]
-        id_b = record["id_b"]
-        loc_a = record["loc_a"]
-        loc_b = record["loc_b"]
+        # безопасно получаем поля (get вернёт None, если нет)
+        id_a = record.get("id_a")
+        id_b = record.get("id_b")
+        loc_a = record.get("loc_a")
+        loc_b = record.get("loc_b")
 
-        leiden_a = record["leiden_a"]
-        leiden_b = record["leiden_b"]
+        # community fields (may be None)
+        leiden_a = record.get("leiden_a")
+        louvain_a = record.get("louvain_a")
+        leiden_b = record.get("leiden_b")
+        louvain_b = record.get("louvain_b")
 
-        # --- Цвет для каждого сообщества ---
-        if leiden_a not in colors_by_community:
-            colors_by_community[leiden_a] = distinct_random_color()
-        if leiden_b not in colors_by_community:
-            colors_by_community[leiden_b] = distinct_random_color()
+        # centrality fields (may be None)
+        pageRank_a = record.get("pageRank_a")
+        betweenness_a = record.get("betweenness_a")
+        pageRank_b = record.get("pageRank_b")
+        betweenness_b = record.get("betweenness_b")
 
-        color_a = colors_by_community[leiden_a]
-        color_b = colors_by_community[leiden_b]
+        # --- Цвета для сообществ: используем первую доступную метку (leiden затем louvain) ---
+        comm_key_a = leiden_a if leiden_a is not None else louvain_a
+        comm_key_b = leiden_b if leiden_b is not None else louvain_b
 
-        # --- Узлы ---
-        if id_a not in features_nodes and loc_a:
+        if comm_key_a is not None and comm_key_a not in colors_by_community:
+            colors_by_community[comm_key_a] = distinct_random_color()
+        if comm_key_b is not None and comm_key_b not in colors_by_community:
+            colors_by_community[comm_key_b] = distinct_random_color()
+
+        color_a = colors_by_community.get(comm_key_a, "#888888")
+        color_b = colors_by_community.get(comm_key_b, "#888888")
+
+        # --- Правильное определение значения метрики (чтобы не перепутать leiden/louvain) ---
+        # используем маппинг с _a / _b ключами, если такого ключа нет — пробуем общий (редко нужно)
+        metric_val_a = None
+        metric_val_b = None
+        key_a = record_key_a.get(metric_name)
+        key_b = record_key_b.get(metric_name)
+        if key_a:
+            metric_val_a = record.get(key_a)
+        if key_b:
+            metric_val_b = record.get(key_b)
+        # fallback: если нет явных алиасов, пытаться взять по простому имени
+        if metric_val_a is None:
+            metric_val_a = record.get(metric_name)
+        if metric_val_b is None:
+            metric_val_b = record.get(metric_name)
+
+        # --- Узлы: сохраняем только если есть геометрия ---
+        if id_a is not None and id_a not in features_nodes and loc_a:
+            props_a = {
+                "id": id_a,
+                "name": record.get("name_a"),
+                "leiden_community": leiden_a,
+                "louvain_community": louvain_a,
+                "pageRank": pageRank_a,
+                "betweenness": betweenness_a,
+                metric_name: metric_val_a,
+                "color": color_a
+            }
+            popup_a = f"<div style='background:white;color:black;padding:6px;border-radius:4px;font-family:sans-serif;font-size:13px;'><b>{props_a['name']}</b><br>{metric_name}: {props_a.get(metric_name)}</div>"
+            props_a["popup"] = popup_a
+
             features_nodes[id_a] = {
                 "type": "Feature",
                 "geometry": point_to_geojson(loc_a),
-                "properties": {
-                    "id": id_a,
-                    "name": record["name_a"],
-                    "leiden_community": leiden_a,
-                    "color": color_a,
-                    "popup": f"<div style='background-color:white; color:black; padding:5px; border-radius:4px; font-family:sans-serif; font-size:12px;'><b>{record['name_a']}</b><br>Community: {leiden_a}</div>"
-                }
+                "properties": props_a
             }
-        if id_b not in features_nodes and loc_b:
+
+        if id_b is not None and id_b not in features_nodes and loc_b:
+            props_b = {
+                "id": id_b,
+                "name": record.get("name_b"),
+                "leiden_community": leiden_b,
+                "louvain_community": louvain_b,
+                "pageRank": pageRank_b,
+                "betweenness": betweenness_b,
+                metric_name: metric_val_b,
+                "color": color_b
+            }
+            popup_b = f"<div style='background:white;color:black;padding:6px;border-radius:4px;font-family:sans-serif;font-size:13px;'><b>{props_b['name']}</b><br>{metric_name}: {props_b.get(metric_name)}</div>"
+            props_b["popup"] = popup_b
+
             features_nodes[id_b] = {
                 "type": "Feature",
                 "geometry": point_to_geojson(loc_b),
-                "properties": {
-                    "id": id_b,
-                    "name": record["name_b"],
-                    "leiden_community": leiden_b,
-                    "color": color_b,
-                    "popup": f"<div style='background-color:white; color:black; padding:5px; border-radius:4px; font-family:sans-serif; font-size:12px;'><b>{record['name_b']}</b><br>Community: {leiden_b}</div>"
-                }
+                "properties": props_b
             }
 
         # --- Связи ---
@@ -136,15 +229,14 @@ with driver.session(database=DATABASE) as session:
                     ]
                 },
                 "properties": {
-                    "name": record["rel_name"],
-                    "duration": record["duration"],
-                    "route": record["route"]
+                    "name": record.get("rel_name"),
+                    "duration": record.get("duration"),
+                    "route": record.get("route")
                 }
             })
 
 driver.close()
 
-# === Два отдельных GeoJSON ===
 geojson_nodes = {
     "type": "FeatureCollection",
     "features": list(features_nodes.values())
@@ -156,28 +248,23 @@ geojson_links = {
 }
 
 if DEBUG:
-    file_nodes = f"nodes_{node_type}.geojson"
-    file_links = f"links_{relation_type}.geojson"
-
-    with open(file_nodes, "w", encoding="utf-8") as f:
+    with open(f"nodes_{node_type}.geojson", "w", encoding="utf-8") as f:
         json.dump(geojson_nodes, f, ensure_ascii=False, indent=2)
-
-    with open(file_links, "w", encoding="utf-8") as f:
+    with open(f"links_{relation_type}.geojson", "w", encoding="utf-8") as f:
         json.dump(geojson_links, f, ensure_ascii=False, indent=2)
-
-log_debug("✅ Узлы сохранены в файл nodes.geojson")
-if DEBUG:
-    print("🎨 Цвета сообществ:")
+    print("Colors by community (sample):")
     for k, v in colors_by_community.items():
-        print(f"  Community {k}: {v}")
+        print(f"  {k}: {v}")
 
+# === Генерация HTML ===
+def generate_leaflet_html_inline(nodes_data, links_data, output_html="map.html", view_mode="community", metric_name="pageRank"):
+    nodes_json = json.dumps(nodes_data, ensure_ascii=False)
+    links_json = json.dumps(links_data, ensure_ascii=False)
 
-# === Генерация HTML-файла ===
-def generate_leaflet_html_inline(nodes_data, links_data, output_html="map.html"):
     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>Neo4j Graph Map</title>
+    <title>Neo4j Graph Map ({metric_name})</title>
     <meta charset="utf-8">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
@@ -188,48 +275,86 @@ def generate_leaflet_html_inline(nodes_data, links_data, output_html="map.html")
 <body>
     <div id="map"></div>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    {'<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>' if view_mode=='centrality' else ''}
+
     <script>
-        const nodesData = {json.dumps(nodes_data, ensure_ascii=False)};
-        const linksData = {json.dumps(links_data, ensure_ascii=False)};
+        const nodesData = {nodes_json};
+        const linksData = {links_json};
+        const metricName = "{metric_name}";
+        const viewMode = "{view_mode}";
+
+        // Исправлено: двойные фигурные скобки для f-строки
+        const tileUrl = viewMode === "community"
+            ? "https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}{{r}}.png"
+            : "https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png";
 
         const map = L.map('map').setView([0, 0], 2);
+        L.tileLayer(tileUrl, {{ maxZoom: 19 }}).addTo(map);
 
-        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-            attribution: '© OpenStreetMap contributors'
-        }}).addTo(map);
-
-        const nodesLayer = L.geoJSON(nodesData, {{
-            pointToLayer: function(feature, latlng) {{
-                const color = feature.properties.color || '#000000';
-                return L.circleMarker(latlng, {{
-                    radius: 8,
-                    fillColor: color,
-                    color: "#000",
-                    weight: 1,
-                    opacity: 1,
-                    fillOpacity: 0.8
-                }});
-            }},
-            onEachFeature: function(feature, layer) {{
-                if (feature.properties.popup) {{
-                    layer.bindPopup(feature.properties.popup);
+        if (viewMode === "community") {{
+            // Простая отрисовка узлов без кластеризации
+            const nodesLayer = L.geoJSON(nodesData, {{
+                pointToLayer: (feature, latlng) => {{
+                    const color = feature.properties?.color || '#3388ff';
+                    const popup = feature.properties?.popup ?? '';
+                    return L.circleMarker(latlng, {{
+                        radius: 8,
+                        color: '#000',
+                        weight: 1,
+                        fillColor: color,
+                        fillOpacity: 0.9
+                    }}).bindPopup(popup);
                 }}
-            }}
-        }}).addTo(map);
+            }}).addTo(map);
 
-        const linksLayer = L.geoJSON(linksData, {{
-            style: {{ color: 'gray', weight: 1.5, opacity: 0.6 }}
-        }}).addTo(map);
+            // Добавляем связи
+            L.geoJSON(linksData, {{
+                style: () => ({{ color: 'gray', weight: 1.2, opacity: 0.4 }})
+            }}).addTo(map);
+        }} 
+        else {{
+            // Тепловая карта
+            const heatPoints = [];
+            nodesData.features.forEach(f => {{
+                const loc = f.geometry?.coordinates;
+                const val = parseFloat(f.properties?.[metricName] || 0);
+                if (loc && !isNaN(val)) heatPoints.push([loc[1], loc[0], val]);
+            }});
+            L.heatLayer(heatPoints, {{
+                radius: 25,
+                blur: 15,
+                maxZoom: 10,
+                minOpacity: 0.3
+            }}).addTo(map);
 
-        const group = new L.featureGroup([...nodesLayer.getLayers(), ...linksLayer.getLayers()]);
-        map.fitBounds(group.getBounds());
+            // Подписи
+            L.geoJSON(nodesData, {{
+                pointToLayer: (feature, latlng) => {{
+                    const val = feature.properties?.[metricName] ?? 0;
+                    const popup = `<b>${{feature.properties.name}}</b><br>${{metricName}}: ${{val}}`;
+                    return L.circleMarker(latlng, {{
+                        radius: 4,
+                        color: '#000',
+                        fillColor: '#fff',
+                        fillOpacity: 0.6
+                    }}).bindPopup(popup);
+                }}
+            }}).addTo(map);
+        }}
+
+        try {{
+            const bounds = L.geoJSON(nodesData).getBounds();
+            map.fitBounds(bounds, {{ padding: [20, 20] }});
+        }} catch (e) {{
+            console.warn('fitBounds failed:', e);
+        }}
     </script>
 </body>
-</html>
-"""
+</html>"""
+
     with open(output_html, "w", encoding="utf-8") as f:
         f.write(html_content)
-    log_debug(f"✅ Карта сохранена в {output_html}")
+    log_debug(f"✅ Карта ({metric_name}) сохранена в {output_html}")
 
-# === В конце скрипта вызываем функцию ===
-generate_leaflet_html_inline(geojson_nodes, geojson_links)
+# === Генерация карты ===
+generate_leaflet_html_inline(geojson_nodes, geojson_links, view_mode=view_mode, metric_name=metric_name)
